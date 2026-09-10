@@ -138,6 +138,10 @@ interface Stats {
   totalCount: number; readyCount: number;
   staleCount: number; dirty: boolean; syncing: boolean;
   syncedAt: string | null; lastFile: string | null;
+  /** When the in-flight background sync started (null when idle). A syncing
+   *  flag older than BUILD_TIMEOUT_MS is orphaned (pi quit / crash / sleep
+   *  killed the detached build) and must be treated as not-syncing. */
+  syncStartedAt?: string | null;
 }
 
 interface SessionState {
@@ -157,6 +161,7 @@ function emptyStats(): Stats {
   return {
     nodeCount: 0, edgeCount: 0, languages: [], totalCount: 0, readyCount: 0,
     staleCount: 0, dirty: false, syncing: false, syncedAt: null, lastFile: null,
+    syncStartedAt: null,
   };
 }
 
@@ -191,6 +196,23 @@ function patchStats(d: string, patch: Partial<Stats>): Stats {
   const next: Stats = { ...(readStats(d) ?? emptyStats()), ...patch };
   writeJsonAtomic(statsPath(d), next);
   return next;
+}
+
+/** True when the syncing flag is orphaned: set, but its build can no longer
+ *  be alive (older than the rebuild budget, or timestamp missing from an
+ *  older version). Callers should clear it instead of showing `syncing…`. */
+function isSyncStale(s: Stats | null): boolean {
+  if (!s?.syncing) return false;
+  if (!s.syncStartedAt) return true;
+  const age = Date.now() - Date.parse(s.syncStartedAt);
+  return Number.isNaN(age) || age > BUILD_TIMEOUT_MS;
+}
+
+/** Clear an orphaned syncing flag (persisted so every session sees it). */
+function healStaleSync(d: string): Stats | null {
+  const s = readStats(d);
+  if (!isSyncStale(s)) return s;
+  return patchStats(d, { syncing: false, syncStartedAt: null });
 }
 
 function readSession(d: string, id: string): SessionState {
@@ -233,7 +255,7 @@ function resolveStats(d: string): Stats | null {
 // ── formatting (mirror claude/format) ───────────────────────────────────────
 
 function freshnessSegment(s: Stats): string {
-  if (s.syncing) return "syncing…";
+  if (s.syncing && !isSyncStale(s)) return "syncing…";
   if (s.dirty && s.staleCount > 0) return `⚠ ${s.staleCount} stale`;
   if (s.dirty) return "⚠ stale";
   return "✓ synced";
@@ -500,6 +522,9 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("graft", "graft: not installed (npm i -g @nanonets/graft)");
         return;
       }
+      // Self-heal here (not just at settle): a restarted session must not
+      // display another process's orphaned `syncing…` for even one turn.
+      healStaleSync(cwd);
       const stats = resolveStats(cwd);
       if (!stats) {
         ctx.ui.setStatus("graft", `graft ${version}: no graph — run graft build`);
@@ -622,6 +647,9 @@ export default function (pi: ExtensionAPI) {
       const staleCount =
         (g.changed?.length ?? 0) + (g.added?.length ?? 0) + (g.removed?.length ?? 0);
       patchStats(cwd, { dirty: true, staleCount, lastFile: basename(abs) });
+      // A stale syncing flag from a killed build must not survive an edit:
+      // the footer should show the real ⚠ stale state, not phantom syncing.
+      healStaleSync(cwd);
       await refreshStatus(ctx, cwd);
     } catch { /* post-edit work is advisory */ }
 
@@ -660,11 +688,14 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled", async (_event, ctx) => {
     const cwd = ctx.cwd;
     if (!hasGraph(cwd) || syncing.has(cwd)) return;
+    // Orphaned flag from a previous process that died mid-build: clear it so
+    // the footer is truthful even when this turn makes no edits (!dirty).
+    healStaleSync(cwd);
     let stats: Stats | null = null;
     try { stats = readStats(cwd); } catch { return; }
     if (!stats?.dirty) return;
     syncing.add(cwd);
-    try { patchStats(cwd, { syncing: true }); } catch { /* ignore */ }
+    try { patchStats(cwd, { syncing: true, syncStartedAt: new Date().toISOString() }); } catch { /* ignore */ }
     await refreshStatus(ctx, cwd);
     const dir = cwd;
     const bin = GRAFT_BIN;
@@ -688,11 +719,11 @@ const writeAtomic = (p, v) => {
 try {
   execFileSync(bin, ["build", "."], { cwd: dir, stdio: "ignore", timeout: ${BUILD_TIMEOUT_MS} });
   const w = readJ(wiringP);
-  if (!w) { writeAtomic(statsP, { ...(readJ(statsP) ?? {}), syncing: false }); process.exit(0); }
+  if (!w) { writeAtomic(statsP, { ...(readJ(statsP) ?? {}), syncing: false, syncStartedAt: null }); process.exit(0); }
   const nodes = w.nodes ?? [], edges = w.edges ?? [];
   writeAtomic(statsP, {
     ...(readJ(statsP) ?? {}),
-    dirty: false, staleCount: 0, syncing: false, syncedAt: new Date().toISOString(),
+    dirty: false, staleCount: 0, syncing: false, syncStartedAt: null, syncedAt: new Date().toISOString(),
     nodeCount: (w.meta && w.meta.nodeCount) || nodes.length,
     edgeCount: (w.meta && w.meta.edgeCount) || edges.length,
     languages: (w.meta && w.meta.languages) || [],
@@ -700,7 +731,7 @@ try {
     readyCount: nodes.filter((n) => n.summary_state === "ready").length,
   });
 } catch {
-  try { writeAtomic(statsP, { ...(readJ(statsP) ?? {}), syncing: false }); } catch {}
+  try { writeAtomic(statsP, { ...(readJ(statsP) ?? {}), syncing: false, syncStartedAt: null }); } catch {}
 }
 `;
     try {
