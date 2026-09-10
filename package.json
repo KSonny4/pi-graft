@@ -1,0 +1,21 @@
+{
+  "name": "pi-graft",
+  "version": "0.1.0",
+  "description": "Graft context-graph support for the pi coding harness — Claude-parity hooks, CLI-backed tools, skill, statusline and commands",
+  "license": "MIT",
+  "keywords": ["pi-package", "graft", "context-graph"],
+  "type": "module",
+  "files": ["extensions/", "skills/", "README.md", "LICENSE"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KSonny4/pi-graft.git"
+  },
+  "homepage": "https://github.com/KSonny4/pi-graft#readme",
+  "pi": {
+    "extensions": ["./extensions/graft.ts"],
+    "skills": ["./skills/graft"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
