@@ -541,16 +541,35 @@ export default function (pi: ExtensionAPI) {
     catch { return "default"; }
   }
 
+  /**
+   * Snapshot the cwd synchronously at handler entry. The ctx object is
+   * invalidated after session teardown (newSession/fork/switchSession/
+   * reload/-p exit) and ANY later touch — even the `cwd` getter — throws a
+   * stale-ctx error. Returns null when the session is already gone; callers
+   * must bail out silently (hooks) or fail soft (tools/commands). Downstream
+   * ctx uses (refreshStatus, notify) stay inside try/catch so a session that
+   * dies mid-flight can never fail the turn.
+   */
+  function snapCwd(ctx: ExtensionContext): string | null {
+    try {
+      const c = ctx.cwd;
+      return typeof c === "string" && c.length > 0 ? c : null;
+    } catch { return null; }
+  }
+
   pi.on("session_start", async (_event, ctx) => {
-    try { oriented.delete(`${sid(ctx)}@${ctx.cwd}`); } catch { /* ignore */ }
-    await refreshStatus(ctx, ctx.cwd);
+    const cwd = snapCwd(ctx);
+    if (!cwd) return;
+    try { oriented.delete(`${sid(ctx)}@${cwd}`); } catch { /* ignore */ }
+    await refreshStatus(ctx, cwd);
   });
 
   // SessionStart + UserPromptSubmit hooks, combined: orientation once per
   // session (persistent message), gated retrieval pack every prompt (this
   // turn's system prompt — per-turn context, never persisted history).
   pi.on("before_agent_start", async (event, ctx) => {
-    const cwd = ctx.cwd;
+    const cwd = snapCwd(ctx);
+    if (!cwd) return;
     if (!hasGraph(cwd)) return;
     const out: { message?: any; systemPrompt?: string } = {};
 
@@ -599,7 +618,8 @@ export default function (pi: ExtensionAPI) {
   // PostToolUse savings hook (every tool) + post-edit hook (edit/write):
   // shared counters, dirty marking, and inline blast radius.
   pi.on("tool_result", async (event, ctx) => {
-    const cwd = ctx.cwd;
+    const cwd = snapCwd(ctx);
+    if (!cwd) return;
     if (!hasGraph(cwd)) return;
     const ev = event as any;
     const toolName: string = ev?.toolName ?? "";
@@ -660,7 +680,8 @@ export default function (pi: ExtensionAPI) {
   // Only runs on turns the savings hook flagged, and duplicate ends can't
   // double-count (lastTallyUuid), mirroring graft's tally.
   pi.on("turn_end", async (event, ctx) => {
-    const cwd = ctx.cwd;
+    const cwd = snapCwd(ctx);
+    if (!cwd) return;
     if (!hasGraph(cwd)) return;
     try {
       const id = sid(ctx);
@@ -686,7 +707,11 @@ export default function (pi: ExtensionAPI) {
   // Detached so it survives `-p` exits; the completion is recorded in the
   // shared stats cache, which the next status refresh picks up.
   pi.on("agent_settled", async (_event, ctx) => {
-    const cwd = ctx.cwd;
+    // Snapshot first: after settle the session may already be torn down and
+    // even reading ctx.cwd throws (stale-ctx). refreshStatus below is
+    // internally guarded, so a death mid-flight stays silent too.
+    const cwd = snapCwd(ctx);
+    if (!cwd) return;
     if (!hasGraph(cwd) || syncing.has(cwd)) return;
     // Orphaned flag from a previous process that died mid-build: clear it so
     // the footer is truthful even when this turn makes no edits (!dirty).
@@ -765,6 +790,8 @@ try {
       in: Type.Optional(Type.String({ description: "narrow to nodes under this path prefix, e.g. server/src" })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const cwd = snapCwd(ctx);
+      if (!cwd) throw new Error("session ended before the tool could run; retry the call");
       const args = ["ask", params.query, "--source"];
       if (params.full) args.push("--full");
       if (typeof params.limit === "number" && Number.isFinite(params.limit)) {
@@ -797,6 +824,8 @@ try {
       fixed: Type.Optional(Type.Boolean({ description: "treat pattern as a literal string, not a regex" })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const cwd = snapCwd(ctx);
+      if (!cwd) throw new Error("session ended before the tool could run; retry the call");
       const args = ["grep", params.pattern];
       if (params.in) args.push("--in", params.in);
       if (params.ignore_case) args.push("-i");
@@ -827,6 +856,8 @@ try {
       in: Type.Optional(Type.String({ description: "narrow matches to this path prefix" })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const cwd = snapCwd(ctx);
+      if (!cwd) throw new Error("session ended before the tool could run; retry the call");
       const args = ["callers", params.symbol];
       args.push("--direction", params.direction === "out" ? "out" : "in");
       if (params.depth !== undefined) args.push("--depth", String(params.depth));
@@ -851,8 +882,10 @@ try {
       file: Type.String({ description: "repo-relative path (or unique basename) of the file" }),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const cwd = snapCwd(ctx);
+      if (!cwd) throw new Error("session ended before the tool could run; retry the call");
       try {
-        const stdout = await runGraftAsync(withContextDirArg(ctx.cwd, ["skeleton", params.file]), ctx.cwd);
+        const stdout = await runGraftAsync(withContextDirArg(cwd, ["skeleton", params.file]), cwd);
         return toolText(stdout.trim() || "(empty — file may not be indexed; try graft build)");
       } catch (err) {
         throw new Error(graftErrorText(err));
@@ -873,6 +906,8 @@ try {
       max_dirs: Type.Optional(Type.Number({ description: "max directory entries shown (default 16)" })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const cwd = snapCwd(ctx);
+      if (!cwd) throw new Error("session ended before the tool could run; retry the call");
       const args = ["map"];
       if (typeof params.max_dirs === "number" && Number.isFinite(params.max_dirs)) {
         args.push("--max-dirs", String(Math.max(1, Math.floor(params.max_dirs))));
@@ -894,14 +929,16 @@ try {
     promptSnippet: "graft_check_freshness: drift report for graft/",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const cwd = snapCwd(ctx);
+      if (!cwd) throw new Error("session ended before the tool could run; retry the call");
       try {
-        const stdout = await runGraftAsync(withContextDirArg(ctx.cwd, ["check"]), ctx.cwd);
-        await refreshStatus(ctx, ctx.cwd);
+        const stdout = await runGraftAsync(withContextDirArg(cwd, ["check"]), cwd);
+        await refreshStatus(ctx, cwd);
         return toolText(stdout.trim() || "graft check: in sync");
       } catch (err) {
         // `graft check` exits 1 on drift — that output IS the answer.
         const text = graftErrorText(err);
-        await refreshStatus(ctx, ctx.cwd);
+        await refreshStatus(ctx, cwd);
         return toolText(text);
       }
     },
@@ -913,35 +950,41 @@ try {
     description: "Build/refresh the graft/ context graph (deterministic, no key)",
     handler: async (args, ctx) => {
       const extra = args.trim() ? args.trim().split(/\s+/) : [];
+      const cwd = snapCwd(ctx);
+      if (!cwd) return;
       ctx.ui.notify("Running graft build…", "info");
       try {
-        const stdout = await runGraftAsync(["build", ...extra], ctx.cwd);
+        const stdout = await runGraftAsync(["build", ...extra], cwd);
         ctx.ui.notify(stdout.trim().split("\n").slice(-3).join("\n") || "graft build done", "info");
       } catch (err) {
         ctx.ui.notify(graftErrorText(err), "error");
       }
-      await refreshStatus(ctx, ctx.cwd);
+      await refreshStatus(ctx, cwd);
     },
   });
 
   pi.registerCommand("graft-check", {
     description: "Check whether graft/ has drifted from the code",
     handler: async (_args, ctx) => {
+      const cwd = snapCwd(ctx);
+      if (!cwd) return;
       try {
-        const stdout = await runGraftAsync(["check"], ctx.cwd);
+        const stdout = await runGraftAsync(["check"], cwd);
         ctx.ui.notify(stdout.trim() || "graft check: in sync", "info");
       } catch (err) {
         ctx.ui.notify(graftErrorText(err), "warning");
       }
-      await refreshStatus(ctx, ctx.cwd);
+      await refreshStatus(ctx, cwd);
     },
   });
 
   pi.registerCommand("graft-map", {
     description: "Show the token-budgeted repo map (orientation)",
     handler: async (_args, ctx) => {
+      const cwd = snapCwd(ctx);
+      if (!cwd) return;
       try {
-        const stdout = await runGraftAsync(["map"], ctx.cwd);
+        const stdout = await runGraftAsync(["map"], cwd);
         ctx.ui.notify(stdout.trim().slice(0, 4000) || "(empty map)", "info");
       } catch (err) {
         ctx.ui.notify(graftErrorText(err), "error");
@@ -952,13 +995,15 @@ try {
   pi.registerCommand("graft-status", {
     description: "Show graft graph stats and this session's tokens-saved tally",
     handler: async (_args, ctx) => {
-      const stats = resolveStats(ctx.cwd);
+      const cwd = snapCwd(ctx);
+      if (!cwd) return;
+      const stats = resolveStats(cwd);
       if (!stats) {
         ctx.ui.notify("graft: no graph — run graft build", "warning");
         return;
       }
       let session: SessionState | null = null;
-      try { session = readSession(ctx.cwd, sid(ctx)); } catch { /* ignore */ }
+      try { session = readSession(cwd, sid(ctx)); } catch { /* ignore */ }
       const s = session ?? emptySession();
       ctx.ui.notify(
         `${renderStatusline(stats, session)}\n` +
