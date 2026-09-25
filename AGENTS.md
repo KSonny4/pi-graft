@@ -8,8 +8,10 @@ for the full integration table (hooks, tools, shared state schema).
 - `extensions/graft.ts` — the pi extension (hooks + CLI-backed tools).
 - `skills/` — bundled skill files. `scripts/publish.sh` — release helper.
 - `graft/` — this checkout's own context graph (INDEX.md + extensions).
-- No `package.json` test/lint/type scripts are defined in this repo; there is
-  no local gate to run. Do not invent one. CI: none.
+- Tests: `npm ci && npm test` (Node >= 22.6, `node:test`, no network). The
+  suite loads the real `extensions/graft.ts` with a fake pi and a fake
+  `graft` CLI (`test/fixtures/`); add a case there for every hook change.
+  CI: none.
 
 ## Shared guidance and Context Fabric (prepare-only, L1 informative)
 

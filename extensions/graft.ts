@@ -767,7 +767,9 @@ try {
     } catch { /* best-effort; the next query refreshes anyway */ }
     // Reconcile locally: the detached run owns completion, this only clears
     // our in-flight guard after a grace period (next settle retries if dirty).
-    setTimeout(() => { syncing.delete(dir); }, BUILD_TIMEOUT_MS);
+    // unref: the guard must never keep `pi -p` alive for the whole grace
+    // period after the session has finished.
+    setTimeout(() => { syncing.delete(dir); }, BUILD_TIMEOUT_MS).unref();
   });
 
   // ── the six tools (MCP names, CLI-backed — pi has no MCP client) ──────────
