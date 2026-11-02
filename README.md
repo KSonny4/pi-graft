@@ -11,7 +11,7 @@ with the **same integration depth Claude Code gets**.
 | Layer | Claude Code | pi (this package) |
 |---|---|---|
 | Instructions | `AGENTS.md` section / skill file | same — pi auto-loads `AGENTS.md` (`graft init --agents agents`); skill bundled here + upstream `pi` host proposed |
-| Per-prompt retrieval | UserPromptSubmit hook: gated `ask --json -n 3`, strength + novelty gates, scope hint | same, via `before_agent_start` → this turn's system prompt |
+| Per-prompt retrieval | UserPromptSubmit hook: gated `ask --json -n 3`, strength + novelty gates, scope hint | same, via `before_agent_start` → a hidden message with relevant context (no system prompt change) |
 | Session orientation | SessionStart hook: directive + INDEX.md + stale banner | same, once per session, as a persistent message |
 | Post-edit | dirty mark + stale count + blast radius inline | same, via `tool_result` on edit/write |
 | Savings tally | graft-vs-source counts, `~N tok saved` accumulator, reply-tally check | same, in the shared session file |
@@ -63,9 +63,10 @@ like Claude's.
   `graft/INDEX.md` slice + stale banner (when the graph drifted).
 - *Per-prompt retrieval.* Every prompt ≥12 chars runs `graft ask --json -n 3`
   (6s budget, pointers-only — never `--source`, so per-prompt tokens stay tiny)
-  through the strength gate (symbol-name or broad match required, else a capped
-  weak-match nudge) and the novelty gate (already-injected pointers are never
-  re-injected). Multi-scope repos narrow via the last-edited file's scope.
+  through the strength gate (symbol-name or broad match required) and the
+  novelty gate (already-injected pointers are never re-injected). Relevant
+  packs arrive as hidden messages; weak or empty matches add nothing.
+  Multi-scope repos narrow via the last-edited file's scope.
 - *Post-edit.* Editing a file appends its blast radius (who depends on it, top
   8, read straight from the wiring graph — no subprocess) to the tool result,
   marks the graph dirty, and refreshes the stale count from `graft check`.

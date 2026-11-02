@@ -6,5 +6,6 @@ case "$1" in
   --version) echo "graft 0.0.0-test" ;;
   check) echo '{"graph":{"changed":["src/a.ts"],"added":[],"removed":[]}}' ;;
   build) exit 0 ;;
+  ask) if [ -f graft/.cache/ask.json ]; then cat graft/.cache/ask.json; else echo '{}'; fi ;;
   *) echo '{}' ;;
 esac
