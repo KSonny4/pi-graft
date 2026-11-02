@@ -11,9 +11,9 @@
  * | directive + INDEX.md slice + stale   | same orientation as a persistent message             |
  * | banner)                              |                                                      |
  * | UserPromptSubmit hook (gated         | `before_agent_start`, every user prompt: runs        |
- * | `graft ask --json -n 3`, strength +  | `graft ask --json -n 3` through the same strength    |
- * | novelty gates, scope hint; pointers- | + novelty gates (+ scope hint) and appends the pack  |
- * | only pack as additionalContext)      | to that turn's system prompt                         |
+ * | `graft ask --json -n 3`, strength +  | `graft ask --json -n 3` through the same gates; a    |
+ * | novelty gates, scope hint; pointers- | relevant pack is a hidden message next to the prompt|
+ * | only pack as additionalContext)      | (like additionalContext); otherwise nothing is added|
  * | PostToolUse edit hook (dirty mark +  | `tool_result` on edit/write: marks the shared       |
  * | stale count + blast radius inline)   | stats cache dirty, refreshes the stale count, and    |
  * |                                      | appends the blast radius to the tool result          |
@@ -62,9 +62,8 @@ const MIN_PROMPT_CHARS = 12;
 /** Strength gate, same two-clause rule as graft's fuse ranking. */
 const STRONG_FLOOR = 0.1;
 const HIGH_FLOOR = 0.5;
-/** Novelty gate memory + weak-nudge budget, same as the Claude hooks. */
+/** Novelty gate memory, same as the Claude hooks. */
 const INJECTED_POINTERS_CAP = 40;
-const NUDGE_CAP = 2;
 
 const SAVINGS_RE = /\[graft\] tokens saved ≈ ([\d,]+)/g;
 /** Anchored on "graft saved" + number + tokens so prose about graft can't trip it. */
@@ -150,7 +149,6 @@ interface SessionState {
   graftReads: number; sourceReads: number;
   savedTokens: number;
   injectedPointers?: string[];
-  nudges?: number;
   graftTurns?: number;
   reportedTurns?: number;
   turnUsedGraft?: boolean;
@@ -168,7 +166,7 @@ function emptyStats(): Stats {
 function emptySession(): SessionState {
   return {
     lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0,
-    savedTokens: 0, injectedPointers: [], nudges: 0,
+    savedTokens: 0, injectedPointers: [],
   };
 }
 
@@ -345,25 +343,15 @@ function formatRetrieval(ask: AskJson, cap = 3): string | null {
   );
 }
 
-function weakMatchNudge(s: SessionState, strong: number): string | null {
-  const spent = s.nudges ?? 0;
-  if (spent >= NUDGE_CAP) return null;
-  s.nudges = spent + 1;
-  return (
-    `[graft] no strong match for this prompt (name-field match ${strong.toFixed(2)}) — the graph ` +
-    `has more than this probe found. Run graft_find_code (or \`graft ask "<your task>" --source\`) before grepping.`
-  );
-}
-
 /** Per-prompt injection gate: strength first, novelty second. Mutates `s`
- *  (injected pointers, nudges); the caller persists it. */
+ *  (injected pointers); the caller persists it. */
 function relevantRetrieval(ask: AskJson, s: SessionState, cap = 3): string | null {
   if (!(ask.hits ?? []).length) return null;
   const lexical = typeof ask.coverage === "number" || typeof ask.coverageStrong === "number";
   if (lexical) {
     const strong = ask.coverageStrong ?? 0;
     const broad = ask.coverage ?? 0;
-    if (strong < STRONG_FLOOR && broad < HIGH_FLOOR) return weakMatchNudge(s, strong);
+    if (strong < STRONG_FLOOR && broad < HIGH_FLOOR) return null;
   }
   const seen = new Set(s.injectedPointers ?? []);
   const fresh = ask.hits.filter((h) => !seen.has(h.pointer));
@@ -565,13 +553,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   // SessionStart + UserPromptSubmit hooks, combined: orientation once per
-  // session (persistent message), gated retrieval pack every prompt (this
-  // turn's system prompt — per-turn context, never persisted history).
+  // session (persistent message), gated retrieval pack as a hidden message
+  // next to the prompt (never change the system prompt).
   pi.on("before_agent_start", async (event, ctx) => {
     const cwd = snapCwd(ctx);
     if (!cwd) return;
     if (!hasGraph(cwd)) return;
-    const out: { message?: any; systemPrompt?: string } = {};
+    let message: { customType: string; content: string; display: false } | undefined;
 
     // 1 · orientation (once per session).
     const okey = `${sid(ctx)}@${cwd}`;
@@ -579,7 +567,7 @@ export default function (pi: ExtensionAPI) {
       oriented.add(okey);
       try {
         const idx = readFileSync(indexPath(cwd), "utf8");
-        out.message = {
+        message = {
           customType: "graft-orientation",
           content: formatOrientation(idx, staleNote(cwd)),
           display: false,
@@ -605,14 +593,14 @@ export default function (pi: ExtensionAPI) {
           const txt = relevantRetrieval(ask, s);
           writeSession(cwd, id, s);
           if (txt) {
-            const base = (event as any)?.systemPrompt ?? ctx.getSystemPrompt();
-            out.systemPrompt = `${base}\n\n${txt}`;
+            if (message) message.content = `${message.content.trimEnd()}\n\n${txt}`;
+            else message = { customType: "graft-retrieval", content: txt, display: false };
           }
         }
       }
     } catch { /* retrieval is advisory — never fail the turn */ }
 
-    if (out.message || out.systemPrompt) return out;
+    if (message) return { message };
   });
 
   // PostToolUse savings hook (every tool) + post-edit hook (edit/write):
